@@ -1,58 +1,47 @@
-use std::{f32::consts, num::NonZeroU32, sync::Arc};
+use std::{num::NonZeroU32, sync::Arc};
 
 use nih_plug::{nih_export_vst3, prelude::*};
+
+mod params;
+mod note;
+use params::TestParams;
+use note::*;
 
 struct TestPlugin {
     params: Arc<TestParams>,
     sample_rate: f32,
-    midi_note_id: u8,
-    phase: f32,
-    test_note_gain: Smoother<f32>,
+
+    voices: [note::NotePlayer; 5],
 }
 impl TestPlugin {
-    fn wave_from_phase(&self) -> f32 {
-        (self.phase * consts::TAU).sin()
-    }
-    fn gen_wave(&mut self) -> f32 {
-        self.phase += 100.0 / self.sample_rate;
-        if self.phase >= 1.0 {
-            self.phase -= 1.0
+    #[inline(always)]
+    fn for_each_voice<T>(&mut self, mut cb: T)
+    where
+        T: FnMut(&mut NotePlayer) -> (),
+    {
+        for voice in self.voices.iter_mut() {
+            cb(voice)
         }
+    }
+    fn wave(&mut self) -> [f32; 2] {
+        let mut sum: [f32; 2] = [0.0, 0.0];
 
-        self.wave_from_phase()
+        self.for_each_voice(|voice| {
+            let voice_wave = voice.next();
+            for i in 0..2 {
+                sum[i] += voice_wave[i];
+            }
+        });
+
+        sum
     }
 }
 impl Default for TestPlugin {
     fn default() -> Self {
         Self {
             params: Arc::new(TestParams::default()),
-            phase: 0.0,
-            midi_note_id: 0,
             sample_rate: 1.0,
-            test_note_gain: Smoother::new(SmoothingStyle::Linear(5.0)),
-        }
-    }
-}
-
-#[derive(Params)]
-struct TestParams {
-    #[id = "gain"]
-    pub gain: FloatParam,
-}
-impl Default for TestParams {
-    fn default() -> Self {
-        Self {
-            gain: FloatParam::new(
-                "Gain",
-                -10.0,
-                FloatRange::Linear {
-                    min: -50.0,
-                    max: 0.0,
-                },
-            )
-            .with_smoother(SmoothingStyle::Linear(3.0))
-            .with_step_size(0.01)
-            .with_unit(" dB"),
+            voices: std::array::from_fn(|_| NotePlayer::default()),
         }
     }
 }
@@ -93,14 +82,13 @@ impl Plugin for TestPlugin {
         _context: &mut impl InitContext<Self>,
     ) -> bool {
         self.sample_rate = buffer_config.sample_rate;
-        self.midi_note_id = 0;
+        self.for_each_voice(|it| it.init(buffer_config));
 
         true
     }
 
     fn reset(&mut self) {
-        self.phase = 0.0;
-        self.test_note_gain.reset(0.0);
+        self.for_each_voice(|it| it.reset());
     }
 
     fn params(&self) -> std::sync::Arc<dyn Params> {
@@ -117,42 +105,54 @@ impl Plugin for TestPlugin {
 
         for (sample_id, samples) in buffer.iter_samples().enumerate() {
             while let Some(ev) = midi_ev {
-                if ev.timing() != sample_id as u32 {
+                if ev.timing() > sample_id as u32 {
                     break;
                 }
                 match ev {
-                    NoteEvent::NoteOn { note, velocity, .. } => {
-                        self.midi_note_id = note;
-
-                        self.test_note_gain.set_target(self.sample_rate, velocity);
+                    NoteEvent::NoteOn {
+                        note,
+                        velocity,
+                        voice_id,
+                        ..
+                    } => {
+                        if let Some(current_note) = NotePlayer::find_by_held_note(
+                            &mut self.voices,
+                            note,
+                        ) {
+                            current_note.release()
+                        }
+                        NotePlayer::find_to_trigger(&mut self.voices).trigger(
+                            voice_id.unwrap_or(-1),
+                            note,
+                            velocity,
+                        );
                     }
-                    NoteEvent::NoteOff { note, .. } if note == self.midi_note_id => {
-                        self.test_note_gain.set_target(self.sample_rate, 0.0);
+                    NoteEvent::NoteOff { note, .. } => {
+                        if let Some(current_note) = NotePlayer::find_by_held_note(
+                            &mut self.voices,
+                            note,
+                        ) {
+                            current_note.release()
+                        }
                     }
                     NoteEvent::PolyPressure { .. } => {}
                     NoteEvent::PolyTuning { .. } => {}
-                    _ => ()
+                    _ => (),
                 }
                 midi_ev = context.next_event();
             }
 
-            let gain_note = self.test_note_gain.next();
+            let wave = self.wave();
             let gain = util::db_to_gain_fast(self.params.gain.smoothed.next());
 
-            let wave = self.gen_wave();
-
-            let v = wave * gain * gain_note;
-
-            for sample in samples {
-                *sample = v;
+            for (i, sample) in samples.into_iter().enumerate() {
+                *sample = wave[i] * gain;
             }
         }
 
         ProcessStatus::Normal
     }
 }
-
-
 
 impl ClapPlugin for TestPlugin {
     const CLAP_ID: &'static str = "me.scidev5";
