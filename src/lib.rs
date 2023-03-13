@@ -11,22 +11,23 @@ struct TestPlugin {
     params: Arc<TestParams>,
     sample_rate: f32,
 
-    voices: [note::NotePlayer; 5],
+    noteplayers: [note::NotePlayer; 5],
+    channel_tunings: [f32; 16],
 }
 impl TestPlugin {
     #[inline(always)]
-    fn for_each_voice<T>(&mut self, mut cb: T)
+    fn for_each_noteplayer<T>(&mut self, mut cb: T)
     where
         T: FnMut(&mut NotePlayer) -> (),
     {
-        for voice in self.voices.iter_mut() {
+        for voice in self.noteplayers.iter_mut() {
             cb(voice)
         }
     }
     fn wave(&mut self) -> [f32; 2] {
         let mut sum: [f32; 2] = [0.0, 0.0];
 
-        self.for_each_voice(|voice| {
+        self.for_each_noteplayer(|voice| {
             let voice_wave = voice.next();
             for i in 0..2 {
                 sum[i] += voice_wave[i];
@@ -41,7 +42,8 @@ impl Default for TestPlugin {
         Self {
             params: Arc::new(TestParams::default()),
             sample_rate: 1.0,
-            voices: std::array::from_fn(|_| NotePlayer::default()),
+            noteplayers: std::array::from_fn(|_| NotePlayer::default()),
+            channel_tunings: [0.0; 16],
         }
     }
 }
@@ -70,7 +72,7 @@ impl Plugin for TestPlugin {
         },
     ];
 
-    const MIDI_INPUT: MidiConfig = MidiConfig::Basic;
+    const MIDI_INPUT: MidiConfig = MidiConfig::MidiCCs;
 
     type SysExMessage = ();
     type BackgroundTask = ();
@@ -82,13 +84,13 @@ impl Plugin for TestPlugin {
         _context: &mut impl InitContext<Self>,
     ) -> bool {
         self.sample_rate = buffer_config.sample_rate;
-        self.for_each_voice(|it| it.init(buffer_config));
+        self.for_each_noteplayer(|it| it.init(buffer_config));
 
         true
     }
 
     fn reset(&mut self) {
-        self.for_each_voice(|it| it.reset());
+        self.for_each_noteplayer(|it| it.reset());
     }
 
     fn params(&self) -> std::sync::Arc<dyn Params> {
@@ -112,31 +114,63 @@ impl Plugin for TestPlugin {
                     NoteEvent::NoteOn {
                         note,
                         velocity,
+                        channel,
                         voice_id,
                         ..
                     } => {
                         if let Some(current_note) = NotePlayer::find_by_held_note(
-                            &mut self.voices,
+                            &mut self.noteplayers,
                             note,
                         ) {
-                            current_note.release()
+                            current_note.release();
                         }
-                        NotePlayer::find_to_trigger(&mut self.voices).trigger(
-                            voice_id.unwrap_or(-1),
+                        let noteplayer = NotePlayer::find_to_trigger(&mut self.noteplayers);
+                        noteplayer.trigger(
+                            channel,
+                            voice_id.unwrap_or_default(),
                             note,
                             velocity,
                         );
+                        noteplayer.tuning(self.channel_tunings[channel as usize]);
                     }
                     NoteEvent::NoteOff { note, .. } => {
                         if let Some(current_note) = NotePlayer::find_by_held_note(
-                            &mut self.voices,
+                            &mut self.noteplayers,
                             note,
                         ) {
                             current_note.release()
                         }
                     }
-                    NoteEvent::PolyPressure { .. } => {}
-                    NoteEvent::PolyTuning { .. } => {}
+                    // // NoteEvent::PolyPressure { note, pressure, channel, .. } => {
+                    // //     // if let Some(note) = NotePlayer::find_by_held_note(&mut self.noteplayers, note) {
+                    // //     //     note.pressure(pressure);
+                    // //     // }
+                    // //     // for note in NotePlayer::find_all_by_channel(&mut self.noteplayers, channel) {
+                    // //     //     note.pressure(pressure);
+                    // //     // }
+                    // //     for note in &mut self.noteplayers {
+                    // //         note.pressure(pressure);
+                    // //     }
+                    // // }
+                    // NoteEvent::MidiChannelPressure { pressure, channel, .. } => {
+                    //     let pressure = pressure / 2.0;
+                    //     // if let Some(note) = NotePlayer::find_by_held_note(&mut self.noteplayers, note) {
+                    //     //     note.pressure(pressure);
+                    //     // }
+                    //     // for note in NotePlayer::find_all_by_channel(&mut self.noteplayers, channel) {
+                    //     //     note.pressure(pressure);
+                    //     // }
+                    //     for note in &mut self.noteplayers {
+                    //         note.pressure(pressure);
+                    //     }
+                    // }
+                    NoteEvent::MidiPitchBend { channel, value, .. } => {
+                        let tuning = (value*256.0-128.0)/8.0*3.0;
+                        self.channel_tunings[channel as usize] = tuning;
+                        for note in NotePlayer::find_all_by_channel(&mut self.noteplayers, channel) {
+                            note.tuning(tuning);
+                        }
+                    }
                     _ => (),
                 }
                 midi_ev = context.next_event();

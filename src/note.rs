@@ -32,6 +32,7 @@ impl Voice {
         } else {
             -1.0
         }
+        // (std::f32::consts::TAU * phase).sin()
     }
 
     pub fn next(&mut self) -> f32 {
@@ -78,6 +79,7 @@ pub struct NotePlayer {
     sample_rate: f32,
 
     voice_id: i32,
+    channel: u8,
     note_id: u8,
 
     state: NoteState,
@@ -85,7 +87,7 @@ pub struct NotePlayer {
     t_since_end: u32,
 
     voices: [[Voice; N_VOICES]; 2],
-    freq: f32,
+    freq_base: f32,
 
     gain: Smoother<f32>,
 }
@@ -94,7 +96,8 @@ impl Default for NotePlayer {
     fn default() -> Self {
         Self {
             sample_rate: 1.0,
-            voice_id: -1,
+            voice_id: 0,
+            channel: 0,
             note_id: 0,
             voices: array::from_fn(|_| {
                 let k = (N_VOICES as i32 + 1) / 2;
@@ -104,7 +107,7 @@ impl Default for NotePlayer {
                     Voice::new(n)
                 })
             }),
-            freq: 0.0,
+            freq_base: 0.0,
             gain: Smoother::new(SmoothingStyle::Linear(5.0)),
 
             state: NoteState::DISABLED,
@@ -146,7 +149,7 @@ impl NotePlayer {
         }
     }
     fn update_voices(&mut self) {
-        let freq = self.freq;
+        let freq = self.freq_base;
         self.for_each_voice(|voice| {
             voice.update_freq_gain(freq, 1.01, 0.3, 0.5);
         });
@@ -161,32 +164,31 @@ impl NotePlayer {
     pub fn init(&mut self, buffer_config: &BufferConfig) {
         let sample_rate = buffer_config.sample_rate;
         self.sample_rate = sample_rate;
-        self.for_each_voice(|voice| {
-            voice.init(sample_rate)
-        });
+        self.for_each_voice(|voice| voice.init(sample_rate));
     }
     pub fn reset(&mut self) {
         self.voice_id = 0;
         self.note_id = 0;
-        self.freq = 0.0;
+        self.freq_base = 0.0;
 
         self.state = NoteState::DISABLED;
         self.t_since_start = 0;
         self.t_since_end = 0;
 
         self.gain.reset(0.0);
-        
+
         self.for_each_voice(Voice::reset);
     }
 
-    pub fn trigger(&mut self, voice_id: i32, midi_note_id: u8, velocity: f32) {
+    pub fn trigger(&mut self, channel: u8, voice_id: i32, midi_note_id: u8, velocity: f32) {
         self.state = NoteState::HELD;
         self.t_since_start = 0;
 
         self.voice_id = voice_id;
+        self.channel = channel;
         self.note_id = midi_note_id;
 
-        self.freq = util::midi_note_to_freq(midi_note_id);
+        self.freq_base = util::midi_note_to_freq(midi_note_id);
 
         self.gain.set_target(self.sample_rate, velocity); // temp
     }
@@ -196,15 +198,21 @@ impl NotePlayer {
 
         self.gain.set_target(self.sample_rate, 0.0); // temp
     }
+    pub fn pressure(&mut self, pressure: f32) {
+        self.gain.set_target(self.sample_rate, pressure); // temp
+    }
+    pub fn tuning(&mut self, tuning: f32) {
+        self.freq_base = util::f32_midi_note_to_freq(self.note_id as f32 + tuning);
+    }
 
     /** Find the voice to begin a new note on. */
-    pub fn find_to_trigger<const N: usize>(voices: &mut [NotePlayer; N]) -> &mut NotePlayer {
+    pub fn find_to_trigger<const N: usize>(noteplayers: &mut [NotePlayer; N]) -> &mut NotePlayer {
         if N == 0 {
             panic!("no voices to pick from in Voice::find_to_start");
         }
-        let mut selected_raw: Option<&mut NotePlayer> = None;
-        for checking in voices {
-            selected_raw = Some(if let Some(selected) = selected_raw {
+        let mut selected: Option<&mut NotePlayer> = None;
+        for checking in noteplayers {
+            selected = Some(if let Some(selected) = selected {
                 match selected.state {
                     NoteState::HELD => {
                         match checking.state {
@@ -240,25 +248,64 @@ impl NotePlayer {
                 checking
             })
         }
-        selected_raw.unwrap()
+        selected.unwrap()
     }
 
     pub fn find_by_held_note<const N: usize>(
-        voices: &mut [NotePlayer; N],
+        noteplayers: &mut [NotePlayer; N],
         midi_note_id: u8,
     ) -> Option<&mut NotePlayer> {
         if N == 0 {
             panic!("no voices to pick from in Voice::find_by_note");
         }
 
-        for voice in voices {
-            match voice.state {
-                NoteState::HELD if voice.note_id == midi_note_id => {
-                    return Some(voice);
+        for noteplayer in noteplayers {
+            match noteplayer.state {
+                NoteState::HELD if noteplayer.note_id == midi_note_id => {
+                    return Some(noteplayer);
                 }
                 _ => (),
             }
         }
         return None;
+    }
+
+    /*
+    pub fn find_by_voice_id<const N: usize>(
+        noteplayers: &mut [NotePlayer; N],
+        voice_id: i32,
+    ) -> Option<&mut NotePlayer> {
+        if N == 0 {
+            panic!("no voices to pick from in Voice::find_by_voice_id");
+        }
+        for noteplayer in noteplayers {
+            match noteplayer.state {
+                NoteState::RELEASED | NoteState::HELD if noteplayer.voice_id == voice_id => {
+                    return Some(noteplayer);
+                }
+                _ => (),
+            }
+        }
+        return None;
+    }
+    */
+    
+    pub fn find_all_by_channel<const N: usize>(
+        noteplayers: &mut [NotePlayer; N],
+        channel: u8,
+    ) -> Vec<&mut NotePlayer> {
+        if N == 0 {
+            panic!("no voices to pick from in Voice::find_by_voice_id");
+        }
+        let mut found:Vec<&mut NotePlayer> = Vec::new();
+        for noteplayer in noteplayers {
+            match noteplayer.state {
+                NoteState::RELEASED | NoteState::HELD if noteplayer.channel == channel => {
+                    found.push(noteplayer);
+                }
+                _ => (),
+            }
+        }
+        return found;
     }
 }
