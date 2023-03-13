@@ -2,11 +2,16 @@ use std::array;
 
 use nih_plug::prelude::*;
 
+struct ToSynthData {
+    aftertouch: f32,
+}
+
 struct Voice {
     sample_rate: f32,
     phase: f32,
 
     n: i32,
+    freq_off: f32,
     freq: f32,
     gain: f32,
 }
@@ -17,30 +22,37 @@ impl Voice {
             phase: 0.0,
             n,
             freq: 0.0,
+            freq_off: 2.0f32.powf((rand::random::<f32>()-0.5)/6.0*0.01),
             gain: 0.0,
         }
     }
-    fn wave(phase: f32) -> f32 {
+    fn wave(phase: f32, d: ToSynthData) -> f32 {
         // const WAVEFORM:[f32;5] = [1.0,0.5,0.25,0.125,0.0625];
         // let mut sum = 0.0;
         // for (i,k) in WAVEFORM.iter().enumerate() {
         //     sum += k * ((i as f32 + 1.0) * phase * std::f32::consts::TAU).sin()
         // }
         // return sum;
-        if phase > 0.5 {
-            1.0
-        } else {
-            -1.0
-        }
+        // if phase > 0.5 {
+        //     1.0
+        // } else {
+        //     -1.0
+        // }
         // (std::f32::consts::TAU * phase).sin()
+
+        let mut sum = (std::f32::consts::TAU * phase).sin();
+        for i in 1..8 {
+            sum += d.aftertouch.powi(2*i + 1) * (i as f32 * phase * std::f32::consts::TAU).sin()
+        }
+        return sum;
     }
 
-    pub fn next(&mut self) -> f32 {
+    pub fn next(&mut self, d:ToSynthData) -> f32 {
         self.phase += self.freq / self.sample_rate;
         if self.phase >= 1.0 {
             self.phase -= 1.0;
         }
-        Voice::wave(self.phase) * self.gain
+        Voice::wave(self.phase, d) * self.gain
     }
 
     pub fn update_freq_gain(
@@ -50,7 +62,7 @@ impl Voice {
         noncenter_gain: f32,
         falloff_per_n: f32,
     ) {
-        self.freq = center_freq * detune_per_n.powi(self.n);
+        self.freq = center_freq * detune_per_n.powi(self.n) * self.freq_off;
         self.gain = if self.n == 0 {
             1.0
         } else {
@@ -90,6 +102,7 @@ pub struct NotePlayer {
     freq_base: f32,
 
     gain: Smoother<f32>,
+    aftertouch: Smoother<f32>,
 }
 
 impl Default for NotePlayer {
@@ -109,6 +122,7 @@ impl Default for NotePlayer {
             }),
             freq_base: 0.0,
             gain: Smoother::new(SmoothingStyle::Linear(5.0)),
+            aftertouch: Smoother::new(SmoothingStyle::Linear(5.0)),
 
             state: NoteState::DISABLED,
             t_since_start: 0,
@@ -130,10 +144,11 @@ impl NotePlayer {
         }
     }
     fn wave(&mut self) -> [f32; 2] {
+        let aftertouch = self.aftertouch.next();
         array::from_fn(|channel_id| {
             let mut sum = 0.0f32;
             for voice in &mut self.voices[channel_id] {
-                sum += voice.next();
+                sum += voice.next(ToSynthData { aftertouch });
             }
             sum
         })
@@ -176,6 +191,7 @@ impl NotePlayer {
         self.t_since_end = 0;
 
         self.gain.reset(0.0);
+        self.aftertouch.reset(0.0);
 
         self.for_each_voice(Voice::reset);
     }
@@ -191,6 +207,7 @@ impl NotePlayer {
         self.freq_base = util::midi_note_to_freq(midi_note_id);
 
         self.gain.set_target(self.sample_rate, velocity); // temp
+        self.aftertouch.reset(0.0);
     }
     pub fn release(&mut self) {
         self.state = NoteState::RELEASED;
@@ -199,7 +216,7 @@ impl NotePlayer {
         self.gain.set_target(self.sample_rate, 0.0); // temp
     }
     pub fn pressure(&mut self, pressure: f32) {
-        self.gain.set_target(self.sample_rate, pressure); // temp
+        self.aftertouch.set_target(self.sample_rate, pressure); // temp
     }
     pub fn tuning(&mut self, tuning: f32) {
         self.freq_base = util::f32_midi_note_to_freq(self.note_id as f32 + tuning);

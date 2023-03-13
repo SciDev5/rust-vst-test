@@ -13,6 +13,7 @@ struct TestPlugin {
 
     noteplayers: [note::NotePlayer; 5],
     channel_tunings: [f32; 16],
+    channel_aftertouch: [f32; 16],
 }
 impl TestPlugin {
     #[inline(always)]
@@ -44,6 +45,7 @@ impl Default for TestPlugin {
             sample_rate: 1.0,
             noteplayers: std::array::from_fn(|_| NotePlayer::default()),
             channel_tunings: [0.0; 16],
+            channel_aftertouch: [0.0; 16],
         }
     }
 }
@@ -132,6 +134,7 @@ impl Plugin for TestPlugin {
                             velocity,
                         );
                         noteplayer.tuning(self.channel_tunings[channel as usize]);
+                        noteplayer.pressure(self.channel_aftertouch[channel as usize])
                     }
                     NoteEvent::NoteOff { note, .. } => {
                         if let Some(current_note) = NotePlayer::find_by_held_note(
@@ -141,29 +144,12 @@ impl Plugin for TestPlugin {
                             current_note.release()
                         }
                     }
-                    // // NoteEvent::PolyPressure { note, pressure, channel, .. } => {
-                    // //     // if let Some(note) = NotePlayer::find_by_held_note(&mut self.noteplayers, note) {
-                    // //     //     note.pressure(pressure);
-                    // //     // }
-                    // //     // for note in NotePlayer::find_all_by_channel(&mut self.noteplayers, channel) {
-                    // //     //     note.pressure(pressure);
-                    // //     // }
-                    // //     for note in &mut self.noteplayers {
-                    // //         note.pressure(pressure);
-                    // //     }
-                    // // }
-                    // NoteEvent::MidiChannelPressure { pressure, channel, .. } => {
-                    //     let pressure = pressure / 2.0;
-                    //     // if let Some(note) = NotePlayer::find_by_held_note(&mut self.noteplayers, note) {
-                    //     //     note.pressure(pressure);
-                    //     // }
-                    //     // for note in NotePlayer::find_all_by_channel(&mut self.noteplayers, channel) {
-                    //     //     note.pressure(pressure);
-                    //     // }
-                    //     for note in &mut self.noteplayers {
-                    //         note.pressure(pressure);
-                    //     }
-                    // }
+                    NoteEvent::MidiChannelPressure { pressure, channel, .. } => {
+                        self.channel_aftertouch[channel as usize] = pressure;
+                        for note in NotePlayer::find_all_by_channel(&mut self.noteplayers, channel) {
+                            note.pressure(pressure);
+                        }
+                    }
                     NoteEvent::MidiPitchBend { channel, value, .. } => {
                         let tuning = (value*256.0-128.0)/8.0*3.0;
                         self.channel_tunings[channel as usize] = tuning;
