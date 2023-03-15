@@ -1,8 +1,13 @@
-use std::array;
+use std::{array};
 
-use nih_plug::prelude::*;
+use nih_plug::{prelude::{Smoother, SmoothingStyle, BufferConfig}, util};
 
-struct ToSynthData {
+use crate::{wavetable::{Wavetable}, common_data::CommonDataRef};
+
+struct ToSynthData<
+    'a
+> {
+    wavetable: &'a Wavetable,
     aftertouch: f32,
 }
 
@@ -40,11 +45,13 @@ impl Voice {
         // }
         // (std::f32::consts::TAU * phase).sin()
 
-        let mut sum = (std::f32::consts::TAU * phase).sin();
-        for i in 1..8 {
-            sum += d.aftertouch.powi(2*i + 1) * (i as f32 * phase * std::f32::consts::TAU).sin()
-        }
-        return sum;
+        // let mut sum = (std::f32::consts::TAU * phase).sin();
+        // for i in 1..8 {
+        //     sum += d.aftertouch.powi(2*i + 1) * (i as f32 * phase * std::f32::consts::TAU).sin()
+        // }
+        // return sum;
+
+        d.wavetable.sample(phase, d.aftertouch)
     }
 
     pub fn next(&mut self, d:ToSynthData) -> f32 {
@@ -98,6 +105,7 @@ pub struct NotePlayer {
     t_since_start: u32,
     t_since_end: u32,
 
+    data: CommonDataRef,
     voices: [[Voice; N_VOICES]; 2],
     freq_base: f32,
 
@@ -105,8 +113,10 @@ pub struct NotePlayer {
     aftertouch: Smoother<f32>,
 }
 
-impl Default for NotePlayer {
-    fn default() -> Self {
+impl NotePlayer {
+    pub fn new(
+        data: CommonDataRef
+    ) -> Self {
         Self {
             sample_rate: 1.0,
             voice_id: 0,
@@ -127,11 +137,10 @@ impl Default for NotePlayer {
             state: NoteState::DISABLED,
             t_since_start: 0,
             t_since_end: 0,
+
+            data,
         }
     }
-}
-
-impl NotePlayer {
     fn increment_t_since(&mut self) {
         match self.state {
             NoteState::DISABLED => {}
@@ -147,8 +156,12 @@ impl NotePlayer {
         let aftertouch = self.aftertouch.next();
         array::from_fn(|channel_id| {
             let mut sum = 0.0f32;
+            let wavetable = &self.data.lock().unwrap().wavetable;
             for voice in &mut self.voices[channel_id] {
-                sum += voice.next(ToSynthData { aftertouch });
+                sum += voice.next(ToSynthData {
+                    aftertouch,
+                    wavetable,
+                });
             }
             sum
         })

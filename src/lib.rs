@@ -1,19 +1,35 @@
-use std::{num::NonZeroU32, sync::Arc};
+use std::{num::NonZeroU32, sync::{Arc, Mutex, atomic::Ordering}, path::Path};
 
+use atomic_float::AtomicF32;
+use common_data::{CommonDataRef, CommonData};
 use nih_plug::{nih_export_vst3, prelude::*};
 
 mod params;
 mod note;
+mod editor;
+mod state;
+mod wavetable;
+mod common_data;
+
 use params::TestParams;
 use note::*;
+use wavetable::Wavetable;
+
+
+const N_NOTEPLAYERS:usize = 5;
 
 struct TestPlugin {
     params: Arc<TestParams>,
     sample_rate: f32,
 
-    noteplayers: [note::NotePlayer; 5],
+    noteplayers: [note::NotePlayer; N_NOTEPLAYERS],
     channel_tunings: [f32; 16],
     channel_aftertouch: [f32; 16],
+
+    peak_meter: Arc<AtomicF32>,
+
+    data: CommonDataRef,
+    last_rel_id: i64,
 }
 impl TestPlugin {
     #[inline(always)]
@@ -24,6 +40,22 @@ impl TestPlugin {
         for voice in self.noteplayers.iter_mut() {
             cb(voice)
         }
+    }
+    fn update_wave(&mut self) {
+        let path = self.params.rel.get_v();
+        let rel_id = self.params.rel_id.load(Ordering::Relaxed);
+        if rel_id == self.last_rel_id {
+            return;
+        } else {
+            self.last_rel_id = rel_id;
+        }
+
+        if let Some(wav) = wavetable::Wav::from_filepath(&Path::new(&path)) {
+            if let Some(wav) = Wavetable::new(wav, 2048) {
+                self.data.lock().unwrap().wavetable = wav;
+            }
+        }
+
     }
     fn wave(&mut self) -> [f32; 2] {
         let mut sum: [f32; 2] = [0.0, 0.0];
@@ -40,12 +72,28 @@ impl TestPlugin {
 }
 impl Default for TestPlugin {
     fn default() -> Self {
+        let data: CommonDataRef = Arc::new(Mutex::new(CommonData {
+            wavetable: Wavetable::default(),
+        }));
+        let mut noteplayers = std::array::from_fn(|_| None);
+        for i in 0 .. N_NOTEPLAYERS {
+            noteplayers[i] = Some(NotePlayer::new(
+                data.clone()
+            ))
+        }
+        let noteplayers = noteplayers.map(|it| it.unwrap());
+
         Self {
             params: Arc::new(TestParams::default()),
             sample_rate: 1.0,
-            noteplayers: std::array::from_fn(|_| NotePlayer::default()),
+            noteplayers,
             channel_tunings: [0.0; 16],
             channel_aftertouch: [0.0; 16],
+
+            peak_meter: Arc::new(AtomicF32::new(util::MINUS_INFINITY_DB)),
+
+            data,
+            last_rel_id: 0,
         }
     }
 }
@@ -86,6 +134,7 @@ impl Plugin for TestPlugin {
         _context: &mut impl InitContext<Self>,
     ) -> bool {
         self.sample_rate = buffer_config.sample_rate;
+        self.update_wave();
         self.for_each_noteplayer(|it| it.init(buffer_config));
 
         true
@@ -97,6 +146,16 @@ impl Plugin for TestPlugin {
 
     fn params(&self) -> std::sync::Arc<dyn Params> {
         self.params.clone()
+    }
+
+    fn editor(&self, _async_executor: AsyncExecutor<Self>) -> Option<Box<dyn Editor>> {
+        editor::create(
+            self.params.clone(),
+            self.params.rel.clone(),
+            self.params.rel_id.clone(),
+            self.peak_meter.clone(),
+            self.params.editor_state.clone(),
+        )
     }
 
     fn process(
@@ -162,11 +221,31 @@ impl Plugin for TestPlugin {
                 midi_ev = context.next_event();
             }
 
+
             let wave = self.wave();
             let gain = util::db_to_gain_fast(self.params.gain.smoothed.next());
 
             for (i, sample) in samples.into_iter().enumerate() {
                 *sample = wave[i] * gain;
+            }
+
+            // To save resources, a plugin can (and probably should!) only perform expensive
+            // calculations that are only displayed on the GUI while the GUI is open
+            if self.params.editor_state.is_open() {
+                self.update_wave();
+
+                let amplitude = wave[0].abs();
+                let current_peak_meter = self.peak_meter.load(std::sync::atomic::Ordering::Relaxed);
+                let new_peak_meter = if amplitude > current_peak_meter {
+                    amplitude
+                } else {
+                    const PEAK_METER_DECAY_WEIGHT:f32 = 0.99;
+                    current_peak_meter * PEAK_METER_DECAY_WEIGHT
+                        + amplitude * (1.0 - PEAK_METER_DECAY_WEIGHT)
+                };
+
+                self.peak_meter
+                    .store(new_peak_meter, std::sync::atomic::Ordering::Relaxed)
             }
         }
 
