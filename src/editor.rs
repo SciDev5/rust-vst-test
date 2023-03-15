@@ -4,6 +4,7 @@ use nih_plug::prelude::{util, Editor};
 use nih_plug_vizia::vizia::prelude::*;
 use nih_plug_vizia::widgets::*;
 use nih_plug_vizia::{assets, create_vizia_editor, ViziaState, ViziaTheming};
+use std::path::Path;
 use std::sync::atomic::{Ordering, AtomicI64};
 use std::sync::Arc;
 use std::thread;
@@ -57,8 +58,15 @@ pub(crate) fn create(
                     let t = t.clone();
                     let t_id = t_id.clone();
                     thread::spawn(move || {
+                        let mut loc = t.get_v();
+                        let last_loc_exists = Path::new(&loc).exists();
+                        if !last_loc_exists {
+                            loc = "~/Desktop".to_string();
+                        }
+                        
+
                         let path = FileDialog::new()
-                            .set_location("~/Desktop")
+                            .set_location(&loc)
                             .add_filter(".WAV Image :3c", &["wav"])
                             .show_open_single_file()
                             .ok().unwrap_or(None);
@@ -70,7 +78,17 @@ pub(crate) fn create(
                         }
                     });
                 }, |cx| {
-                    Label::new(cx, Data::t.map(|p| p.get_v()))
+                    Label::new(cx, Data::t.map(|p| {
+                        let loc = p.get_v();
+                        let loc = Path::new(&loc);
+                        let default_loc = "<default>".to_string();
+                        return if !loc.is_file() {
+                            default_loc
+                        } else if let Some(n) = loc.file_name() { if let Some(n) = n.to_str() {
+                            n.to_string()
+                        } else { default_loc } }
+                        else { default_loc }
+                    }))
                 });
             }
 
