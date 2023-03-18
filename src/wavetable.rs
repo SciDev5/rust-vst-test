@@ -1,94 +1,164 @@
+use crate::{util::Lerpable};
 use std::{
     fs::File,
     io::{self, Cursor, Read},
     path::Path,
 };
 
-const DEFAULT_WAVE: &[u8; 2097288] = include_bytes!("default_wave.wav");
+const DEFAULT_WAVE: &[u8; 2097288] = include_bytes!("./assets/default_wave.wav");
 
-trait Lerpable<Bound> {
-    fn lerp(&self, lower: Bound, upper: Bound) -> Self;
+fn remap_index(x: f32, size: usize) -> usize {
+    ((x * size as f32) as usize).min(size - 1)
 }
-impl Lerpable<f32> for f32 {
-    fn lerp(&self, lower: f32, upper: f32) -> Self {
-        return lower * (1.0 - self) + upper * self;
+
+pub struct WavetableRaw {
+    data: Box<[f32; Self::SIZE * Self::SIZE]>,
+}
+impl WavetableRaw {
+    pub const SIZE: usize = 2048;
+
+    pub fn sample(&self, sample: f32, slice: f32) -> f32 {
+        self.data[Self::index(
+            remap_index(slice, Self::SIZE),
+            remap_index(sample, Self::SIZE),
+        )]
+    }
+
+    fn index(slice: usize, sample: usize) -> usize {
+        slice * Self::SIZE + sample
+    }
+}
+impl Default for WavetableRaw {
+    fn default() -> Self {
+        Self {
+            data: vec![0.0f32; Self::SIZE * Self::SIZE].try_into().unwrap(),
+        }
     }
 }
 
+pub type WavetableSlices = Vec<[f32; Wavetable::SLICE_LEN]>;
 pub struct Wavetable {
-    data: Vec<Vec<f32>>,
-    // data_base: Vec<f32>,
-    // slice_length: usize,
+    pub data: WavetableRaw,
+
+    slices: WavetableSlices,
 }
 
 impl Wavetable {
-    pub const SIZE: usize = 2048;
+    pub const SLICE_LEN: usize = 512;
 
-    pub fn new(data_base: Vec<f32>, slice_length: usize) -> Option<Self> {
-        if data_base.len() == 0 || slice_length <= 2 {
+    pub fn slice_downsample(data_raw: &Vec<f32>, real_slice_len: usize) -> Option<Self> {
+        if real_slice_len % Self::SLICE_LEN != 0 || real_slice_len < Self::SLICE_LEN {
             return None;
         }
-        if !data_base.len().is_power_of_two() || !slice_length.is_power_of_two() {
+        let downsample_ratio = real_slice_len / Self::SLICE_LEN;
+        let mut downsampled_data = vec![0.0f32; data_raw.len() / downsample_ratio];
+        for i in 0..downsampled_data.len() {
+            let mut sum = 0.0f32;
+            for sample in data_raw[downsample_ratio * i..downsample_ratio * (i + 1)].into_iter() {
+                sum += sample;
+            }
+            downsampled_data[i] = sum / downsample_ratio as f32;
+        }
+        Self::slice(&downsampled_data)
+    }
+    pub fn slice(data_raw: &Vec<f32>) -> Option<Self> {
+        if data_raw.len() % Self::SLICE_LEN != 0 {
             return None;
         }
-        if slice_length >= data_base.len() {
-            return None;
-        }
-
-        let mut data = vec![vec![0.0; Self::SIZE]; Self::SIZE];
-        for slice in 0..Self::SIZE {
-            for sample in 0..Self::SIZE {
-                data[slice][sample] = Self::sample_source(
-                    &data_base,
-                    slice_length,
-                    sample as f32 / Self::SIZE as f32,
-                    slice as f32 / Self::SIZE as f32,
-                )
+        let mut slices: WavetableSlices =
+            vec![[0.0; Wavetable::SLICE_LEN]; data_raw.len() / Self::SLICE_LEN];
+        for slice_id in 0..slices.len() {
+            for sample_id in 0..Wavetable::SLICE_LEN {
+                slices[slice_id][sample_id] = data_raw[sample_id + slice_id * Wavetable::SLICE_LEN];
             }
         }
-
-        Some(Self {
-            // data_base,
-            // slice_length,
-            data,
-        })
+        Some(Self::new(slices))
     }
-    fn sample_source(
-        data_base: &Vec<f32>,
-        slice_length: usize,
-        sample_phase: f32,
-        slice_phase: f32,
-    ) -> f32 {
-        let n_slices = data_base.len() / slice_length;
+    pub fn new(slices: WavetableSlices) -> Self {
+        if slices.len() == 0 {
+            return Self {
+                data: WavetableRaw::default(),
+                slices: vec![[0.0; Self::SLICE_LEN]],
+            };
+        }
 
-        let slice_i_lw = (slice_phase * n_slices as f32) as usize;
-        let slice_i_hi = (slice_i_lw + 1) % n_slices;
-        let slice_k = (slice_phase * n_slices as f32) - slice_i_lw as f32;
+        let mut instance = Self {
+            data: WavetableRaw::default(),
+            slices,
+        };
+        instance.update_data();
 
-        let sample_i_lw = (sample_phase * slice_length as f32) as usize;
-        let sample_i_hi = (sample_i_lw + 1) % slice_length;
-        let sample_k = (slice_phase * slice_length as f32) - sample_i_lw as f32;
+        return instance;
+    }
+    pub fn update_data(&mut self) {
+        let mut slices: Vec<[f32; WavetableRaw::SIZE]> = vec![];
+        for slice in &self.slices {
+            slices.push(Self::upsample_slice(slice));
+        }
 
-        slice_k.lerp(
-            sample_k.lerp(
-                data_base[slice_i_lw * slice_length + sample_i_lw],
-                data_base[slice_i_lw * slice_length + sample_i_hi],
-            ),
-            sample_k.lerp(
-                data_base[slice_i_hi * slice_length + sample_i_lw],
-                data_base[slice_i_hi * slice_length + sample_i_hi],
-            ),
-        )
+        let slices_interpolated = Self::interp_slices(slices);
+
+        for slice in 0..WavetableRaw::SIZE {
+            for sample in 0..WavetableRaw::SIZE {
+                self.data.data[WavetableRaw::index(slice, sample)] =
+                    slices_interpolated[slice][sample];
+            }
+        }
+    }
+    fn upsample_slice(slice: &[f32; Wavetable::SLICE_LEN]) -> [f32; WavetableRaw::SIZE] {
+        Self::upsample_slice_linear(slice)
+    }
+    fn interp_slices(slices: Vec<[f32; WavetableRaw::SIZE]>) -> Vec<[f32; WavetableRaw::SIZE]> {
+        Self::interp_slices_linear(slices)
     }
 
-    pub fn sample(&self, sample_phase: f32, slice_phase: f32) -> f32 {
-        self.data[((slice_phase * Self::SIZE as f32) as usize).clamp(0, Self::SIZE-1)]
-            [((sample_phase * Self::SIZE as f32) as usize).clamp(0, Self::SIZE-1)]
+    fn upsample_slice_linear(slice: &[f32; Wavetable::SLICE_LEN]) -> [f32; WavetableRaw::SIZE] {
+        let mut out = [0.0f32; WavetableRaw::SIZE];
+        for i in 0..Wavetable::SLICE_LEN {
+            const R: usize = WavetableRaw::SIZE / Wavetable::SLICE_LEN;
+            let i1 = (i + 1) % Wavetable::SLICE_LEN;
+            for j in 0..R {
+                let k = j as f32 / R as f32;
+                out[i * R + j] = k.lerp(slice[i], slice[i1]);
+            }
+        }
+        return out;
     }
+    fn interp_slices_linear(
+        slices: Vec<[f32; WavetableRaw::SIZE]>,
+    ) -> Vec<[f32; WavetableRaw::SIZE]> {
+
+        let mut slices_out: Vec<[f32; WavetableRaw::SIZE]> = Vec::with_capacity(WavetableRaw::SIZE);
+
+        let mut out = [0.0f32; WavetableRaw::SIZE];
+        for slice_n in 0..WavetableRaw::SIZE {
+            let table_k = slice_n as f32 / (WavetableRaw::SIZE - 1) as f32;
+            let j_f32 = table_k * (slices.len() - 1) as f32;
+            let j = (j_f32 as usize).min(slices.len() - 2);
+            let k = j as f32 - j_f32;
+
+            let slice0 = slices[j];
+            let slice1 = slices[j + 1];
+            for i in 0..WavetableRaw::SIZE {
+                out[i] = k.lerp(slice0[i], slice1[i]);
+            }
+            slices_out.push(out);
+        }
+        return slices_out;
+    }
+    
+    // fn interp_slices_fftmorph(
+    //     slices: Vec<[f32; WavetableRaw::SIZE]>,
+    // ) -> Vec<[f32; WavetableRaw::SIZE]> {
+    //     let planner = FftPlanner::<f32>::new();
+    //     let mut fft_fwd = planner.plan_fft_forward(WavetableRaw::SIZE);
+    //     let mut fft_inv = planner.plan_fft_inverse(WavetableRaw::SIZE);
+    //     // todo
+    // }
 }
 impl Default for Wavetable {
     fn default() -> Self {
-        Self::new(Wav::from_bytes(DEFAULT_WAVE).unwrap(), 2048).expect("default wavetable invalid")
+        Self::slice_downsample(&Wav::from_bytes(DEFAULT_WAVE).unwrap(), 2048).unwrap()
     }
 }
 

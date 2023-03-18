@@ -11,7 +11,7 @@ struct ToSynthData<
     aftertouch: f32,
 }
 
-struct Voice {
+struct VoiceOsc {
     sample_rate: f32,
     phase: f32,
 
@@ -20,7 +20,7 @@ struct Voice {
     freq: f32,
     gain: f32,
 }
-impl Voice {
+impl VoiceOsc {
     fn new(n: i32) -> Self {
         Self {
             sample_rate: 1.0,
@@ -51,7 +51,7 @@ impl Voice {
         // }
         // return sum;
 
-        d.wavetable.sample(phase, d.aftertouch)
+        d.wavetable.data.sample(phase, d.aftertouch)
     }
 
     pub fn next(&mut self, d:ToSynthData) -> f32 {
@@ -59,7 +59,7 @@ impl Voice {
         if self.phase >= 1.0 {
             self.phase -= 1.0;
         }
-        Voice::wave(self.phase, d) * self.gain
+        VoiceOsc::wave(self.phase, d) * self.gain
     }
 
     pub fn update_freq_gain(
@@ -86,7 +86,7 @@ impl Voice {
     }
 }
 
-pub enum NoteState {
+pub enum VoiceNoteState {
     DISABLED,
     HELD,
     RELEASED,
@@ -94,26 +94,26 @@ pub enum NoteState {
 
 const N_VOICES: usize = 7;
 
-pub struct NotePlayer {
+pub struct Voice {
     sample_rate: f32,
 
     voice_id: i32,
     channel: u8,
     note_id: u8,
 
-    state: NoteState,
+    state: VoiceNoteState,
     t_since_start: u32,
     t_since_end: u32,
 
     data: CommonDataRef,
-    voices: [[Voice; N_VOICES]; 2],
+    oscillators: [[VoiceOsc; N_VOICES]; 2],
     freq_base: f32,
 
     gain: Smoother<f32>,
     aftertouch: Smoother<f32>,
 }
 
-impl NotePlayer {
+impl Voice {
     pub fn new(
         data: CommonDataRef
     ) -> Self {
@@ -122,19 +122,19 @@ impl NotePlayer {
             voice_id: 0,
             channel: 0,
             note_id: 0,
-            voices: array::from_fn(|_| {
+            oscillators: array::from_fn(|_| {
                 let k = (N_VOICES as i32 + 1) / 2;
                 array::from_fn(|i_raw| {
                     let i = i_raw as i32;
                     let n = if i < k { i } else { i + 1 - 2 * k };
-                    Voice::new(n)
+                    VoiceOsc::new(n)
                 })
             }),
             freq_base: 0.0,
             gain: Smoother::new(SmoothingStyle::Linear(5.0)),
             aftertouch: Smoother::new(SmoothingStyle::Linear(5.0)),
 
-            state: NoteState::DISABLED,
+            state: VoiceNoteState::DISABLED,
             t_since_start: 0,
             t_since_end: 0,
 
@@ -143,11 +143,11 @@ impl NotePlayer {
     }
     fn increment_t_since(&mut self) {
         match self.state {
-            NoteState::DISABLED => {}
-            NoteState::HELD => {
+            VoiceNoteState::DISABLED => {}
+            VoiceNoteState::HELD => {
                 self.t_since_start += 1;
             }
-            NoteState::RELEASED => {
+            VoiceNoteState::RELEASED => {
                 self.t_since_end += 1;
             }
         }
@@ -157,7 +157,7 @@ impl NotePlayer {
         array::from_fn(|channel_id| {
             let mut sum = 0.0f32;
             let wavetable = &self.data.lock().unwrap().wavetable;
-            for voice in &mut self.voices[channel_id] {
+            for voice in &mut self.oscillators[channel_id] {
                 sum += voice.next(ToSynthData {
                     aftertouch,
                     wavetable,
@@ -166,51 +166,51 @@ impl NotePlayer {
             sum
         })
     }
-    fn for_each_voice<V>(&mut self, mut cb: V)
+    fn for_each_oscillator<V>(&mut self, mut cb: V)
     where
-        V: FnMut(&mut Voice) -> (),
+        V: FnMut(&mut VoiceOsc) -> (),
     {
-        for voices_for_channel in &mut self.voices {
-            for voice in voices_for_channel {
-                cb(voice);
+        for oscs_for_channel in &mut self.oscillators {
+            for osc in oscs_for_channel {
+                cb(osc);
             }
         }
     }
-    fn update_voices(&mut self) {
+    fn update_oscillators(&mut self) {
         let freq = self.freq_base;
-        self.for_each_voice(|voice| {
+        self.for_each_oscillator(|voice| {
             voice.update_freq_gain(freq, 1.01, 0.3, 0.5);
         });
     }
 
     pub fn next(&mut self) -> [f32; 2] {
         self.increment_t_since();
-        self.update_voices();
+        self.update_oscillators();
         let gain = self.gain.next();
         return self.wave().map(|v| v * gain);
     }
     pub fn init(&mut self, buffer_config: &BufferConfig) {
         let sample_rate = buffer_config.sample_rate;
         self.sample_rate = sample_rate;
-        self.for_each_voice(|voice| voice.init(sample_rate));
+        self.for_each_oscillator(|voice| voice.init(sample_rate));
     }
     pub fn reset(&mut self) {
         self.voice_id = 0;
         self.note_id = 0;
         self.freq_base = 0.0;
 
-        self.state = NoteState::DISABLED;
+        self.state = VoiceNoteState::DISABLED;
         self.t_since_start = 0;
         self.t_since_end = 0;
 
         self.gain.reset(0.0);
         self.aftertouch.reset(0.0);
 
-        self.for_each_voice(Voice::reset);
+        self.for_each_oscillator(VoiceOsc::reset);
     }
 
     pub fn trigger(&mut self, channel: u8, voice_id: i32, midi_note_id: u8, velocity: f32) {
-        self.state = NoteState::HELD;
+        self.state = VoiceNoteState::HELD;
         self.t_since_start = 0;
 
         self.voice_id = voice_id;
@@ -223,7 +223,7 @@ impl NotePlayer {
         self.aftertouch.reset(0.0);
     }
     pub fn release(&mut self) {
-        self.state = NoteState::RELEASED;
+        self.state = VoiceNoteState::RELEASED;
         self.t_since_end = 0;
 
         self.gain.set_target(self.sample_rate, 0.0); // temp
@@ -236,19 +236,19 @@ impl NotePlayer {
     }
 
     /** Find the voice to begin a new note on. */
-    pub fn find_to_trigger<const N: usize>(noteplayers: &mut [NotePlayer; N]) -> &mut NotePlayer {
+    pub fn find_to_trigger<const N: usize>(noteplayers: &mut [Voice; N]) -> &mut Voice {
         if N == 0 {
             panic!("no voices to pick from in Voice::find_to_start");
         }
-        let mut selected: Option<&mut NotePlayer> = None;
+        let mut selected: Option<&mut Voice> = None;
         for checking in noteplayers {
             selected = Some(if let Some(selected) = selected {
                 match selected.state {
-                    NoteState::HELD => {
+                    VoiceNoteState::HELD => {
                         match checking.state {
-                            NoteState::DISABLED => checking, // prefer to override unused voice
-                            NoteState::RELEASED => checking, // prefer to override released voice over held
-                            NoteState::HELD => {
+                            VoiceNoteState::DISABLED => checking, // prefer to override unused voice
+                            VoiceNoteState::RELEASED => checking, // prefer to override released voice over held
+                            VoiceNoteState::HELD => {
                                 // prefer to override the one that started longer ago
                                 if checking.t_since_start > selected.t_since_start {
                                     checking
@@ -258,11 +258,11 @@ impl NotePlayer {
                             }
                         }
                     }
-                    NoteState::RELEASED => {
+                    VoiceNoteState::RELEASED => {
                         match checking.state {
-                            NoteState::DISABLED => checking, // prefer to override unused voice
-                            NoteState::HELD => selected, // prefer to override released voice over held
-                            NoteState::RELEASED => {
+                            VoiceNoteState::DISABLED => checking, // prefer to override unused voice
+                            VoiceNoteState::HELD => selected, // prefer to override released voice over held
+                            VoiceNoteState::RELEASED => {
                                 // prefer to override the one that ended longer ago
                                 if checking.t_since_end > selected.t_since_end {
                                     checking
@@ -272,7 +272,7 @@ impl NotePlayer {
                             }
                         }
                     }
-                    NoteState::DISABLED => selected, // prefer to override unused voice
+                    VoiceNoteState::DISABLED => selected, // prefer to override unused voice
                 }
             } else {
                 checking
@@ -282,17 +282,17 @@ impl NotePlayer {
     }
 
     pub fn find_by_held_note<const N: usize>(
-        noteplayers: &mut [NotePlayer; N],
+        voices: &mut [Voice; N],
         midi_note_id: u8,
-    ) -> Option<&mut NotePlayer> {
+    ) -> Option<&mut Voice> {
         if N == 0 {
             panic!("no voices to pick from in Voice::find_by_note");
         }
 
-        for noteplayer in noteplayers {
-            match noteplayer.state {
-                NoteState::HELD if noteplayer.note_id == midi_note_id => {
-                    return Some(noteplayer);
+        for voice in voices {
+            match voice.state {
+                VoiceNoteState::HELD if voice.note_id == midi_note_id => {
+                    return Some(voice);
                 }
                 _ => (),
             }
@@ -302,36 +302,36 @@ impl NotePlayer {
 
     /*
     pub fn find_by_voice_id<const N: usize>(
-        noteplayers: &mut [NotePlayer; N],
+        voices: &mut [Voice; N],
         voice_id: i32,
-    ) -> Option<&mut NotePlayer> {
+    ) -> Option<&mut Voice> {
         if N == 0 {
             panic!("no voices to pick from in Voice::find_by_voice_id");
         }
-        for noteplayer in noteplayers {
-            match noteplayer.state {
-                NoteState::RELEASED | NoteState::HELD if noteplayer.voice_id == voice_id => {
-                    return Some(noteplayer);
+        for voice in voices {
+            match voice.state {
+                VoiceNoteState::RELEASED | VoiceNoteState::HELD if voice.voice_id == voice_id => {
+                    return Some(voice);
                 }
                 _ => (),
             }
         }
         return None;
     }
-    */
+    // */
     
     pub fn find_all_by_channel<const N: usize>(
-        noteplayers: &mut [NotePlayer; N],
+        voices: &mut [Voice; N],
         channel: u8,
-    ) -> Vec<&mut NotePlayer> {
+    ) -> Vec<&mut Voice> {
         if N == 0 {
             panic!("no voices to pick from in Voice::find_by_voice_id");
         }
-        let mut found:Vec<&mut NotePlayer> = Vec::new();
-        for noteplayer in noteplayers {
-            match noteplayer.state {
-                NoteState::RELEASED | NoteState::HELD if noteplayer.channel == channel => {
-                    found.push(noteplayer);
+        let mut found:Vec<&mut Voice> = Vec::new();
+        for voice in voices {
+            match voice.state {
+                VoiceNoteState::RELEASED | VoiceNoteState::HELD if voice.channel == channel => {
+                    found.push(voice);
                 }
                 _ => (),
             }

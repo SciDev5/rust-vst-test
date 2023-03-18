@@ -10,19 +10,21 @@ mod editor;
 mod state;
 mod wavetable;
 mod common_data;
+mod util;
+mod dbug;
 
 use params::TestParams;
 use note::*;
 use wavetable::Wavetable;
 
 
-const N_NOTEPLAYERS:usize = 5;
+const N_VOICES:usize = 5;
 
 struct TestPlugin {
     params: Arc<TestParams>,
     sample_rate: f32,
 
-    noteplayers: [note::NotePlayer; N_NOTEPLAYERS],
+    voices: [note::Voice; N_VOICES],
     channel_tunings: [f32; 16],
     channel_aftertouch: [f32; 16],
 
@@ -33,25 +35,25 @@ struct TestPlugin {
 }
 impl TestPlugin {
     #[inline(always)]
-    fn for_each_noteplayer<T>(&mut self, mut cb: T)
+    fn for_each_voice<T>(&mut self, mut cb: T)
     where
-        T: FnMut(&mut NotePlayer) -> (),
+        T: FnMut(&mut Voice) -> (),
     {
-        for voice in self.noteplayers.iter_mut() {
+        for voice in self.voices.iter_mut() {
             cb(voice)
         }
     }
     fn update_wave(&mut self) {
-        let path = self.params.rel.get_v();
         let rel_id = self.params.rel_id.load(Ordering::Relaxed);
         if rel_id == self.last_rel_id {
             return;
         } else {
             self.last_rel_id = rel_id;
         }
+        let path = self.params.rel.get_v();
 
         if let Some(wav) = wavetable::Wav::from_filepath(&Path::new(&path)) {
-            if let Some(wav) = Wavetable::new(wav, 2048) {
+            if let Some(wav) = Wavetable::slice_downsample(&wav, 2048) {
                 self.data.lock().unwrap().wavetable = wav;
             }
         }
@@ -60,7 +62,7 @@ impl TestPlugin {
     fn wave(&mut self) -> [f32; 2] {
         let mut sum: [f32; 2] = [0.0, 0.0];
 
-        self.for_each_noteplayer(|voice| {
+        self.for_each_voice(|voice| {
             let voice_wave = voice.next();
             for i in 0..2 {
                 sum[i] += voice_wave[i];
@@ -75,22 +77,22 @@ impl Default for TestPlugin {
         let data: CommonDataRef = Arc::new(Mutex::new(CommonData {
             wavetable: Wavetable::default(),
         }));
-        let mut noteplayers = std::array::from_fn(|_| None);
-        for i in 0 .. N_NOTEPLAYERS {
-            noteplayers[i] = Some(NotePlayer::new(
+        let mut voices = std::array::from_fn(|_| None);
+        for i in 0 .. N_VOICES {
+            voices[i] = Some(Voice::new(
                 data.clone()
             ))
         }
-        let noteplayers = noteplayers.map(|it| it.unwrap());
+        let voices = voices.map(|it| it.unwrap());
 
         Self {
             params: Arc::new(TestParams::default()),
             sample_rate: 1.0,
-            noteplayers,
+            voices,
             channel_tunings: [0.0; 16],
             channel_aftertouch: [0.0; 16],
 
-            peak_meter: Arc::new(AtomicF32::new(util::MINUS_INFINITY_DB)),
+            peak_meter: Arc::new(AtomicF32::new(nih_plug::prelude::util::MINUS_INFINITY_DB)),
 
             data,
             last_rel_id: 0,
@@ -135,13 +137,13 @@ impl Plugin for TestPlugin {
     ) -> bool {
         self.sample_rate = buffer_config.sample_rate;
         self.update_wave();
-        self.for_each_noteplayer(|it| it.init(buffer_config));
+        self.for_each_voice(|it| it.init(buffer_config));
 
         true
     }
 
     fn reset(&mut self) {
-        self.for_each_noteplayer(|it| it.reset());
+        self.for_each_voice(|it| it.reset());
     }
 
     fn params(&self) -> std::sync::Arc<dyn Params> {
@@ -179,25 +181,25 @@ impl Plugin for TestPlugin {
                         voice_id,
                         ..
                     } => {
-                        if let Some(current_note) = NotePlayer::find_by_held_note(
-                            &mut self.noteplayers,
+                        if let Some(current_note) = Voice::find_by_held_note(
+                            &mut self.voices,
                             note,
                         ) {
                             current_note.release();
                         }
-                        let noteplayer = NotePlayer::find_to_trigger(&mut self.noteplayers);
-                        noteplayer.trigger(
+                        let voice = Voice::find_to_trigger(&mut self.voices);
+                        voice.trigger(
                             channel,
                             voice_id.unwrap_or_default(),
                             note,
                             velocity,
                         );
-                        noteplayer.tuning(self.channel_tunings[channel as usize]);
-                        noteplayer.pressure(self.channel_aftertouch[channel as usize])
+                        voice.tuning(self.channel_tunings[channel as usize]);
+                        voice.pressure(self.channel_aftertouch[channel as usize])
                     }
                     NoteEvent::NoteOff { note, .. } => {
-                        if let Some(current_note) = NotePlayer::find_by_held_note(
-                            &mut self.noteplayers,
+                        if let Some(current_note) = Voice::find_by_held_note(
+                            &mut self.voices,
                             note,
                         ) {
                             current_note.release()
@@ -205,14 +207,14 @@ impl Plugin for TestPlugin {
                     }
                     NoteEvent::MidiChannelPressure { pressure, channel, .. } => {
                         self.channel_aftertouch[channel as usize] = pressure;
-                        for note in NotePlayer::find_all_by_channel(&mut self.noteplayers, channel) {
+                        for note in Voice::find_all_by_channel(&mut self.voices, channel) {
                             note.pressure(pressure);
                         }
                     }
                     NoteEvent::MidiPitchBend { channel, value, .. } => {
                         let tuning = (value*256.0-128.0)/8.0*3.0;
                         self.channel_tunings[channel as usize] = tuning;
-                        for note in NotePlayer::find_all_by_channel(&mut self.noteplayers, channel) {
+                        for note in Voice::find_all_by_channel(&mut self.voices, channel) {
                             note.tuning(tuning);
                         }
                     }
@@ -223,7 +225,7 @@ impl Plugin for TestPlugin {
 
 
             let wave = self.wave();
-            let gain = util::db_to_gain_fast(self.params.gain.smoothed.next());
+            let gain = nih_plug::prelude::util::db_to_gain_fast(self.params.gain.smoothed.next());
 
             for (i, sample) in samples.into_iter().enumerate() {
                 *sample = wave[i] * gain;

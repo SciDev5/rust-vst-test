@@ -26,6 +26,7 @@ serde = "1.0.155"
 crossbeam = "0.8.2"
 native-dialog = "0.6.3"
 wav = "1.0.0"
+rustfft = "6.1.0"
 
 
 [profile.release]
