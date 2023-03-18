@@ -5,7 +5,7 @@ use nih_plug::prelude::{Params, FloatParam, FloatRange, SmoothingStyle};
 use nih_plug_vizia::ViziaState;
 
 use crate::editor;
-use crate::state::TextState;
+use crate::state::text::TextState;
 
 #[derive(Params)]
 pub struct TestParams {

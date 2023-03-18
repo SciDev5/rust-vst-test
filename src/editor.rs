@@ -10,8 +10,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-use crate::params::{TestParams};
-use crate::state::TextState;
+use crate::params::TestParams;
+use crate::state::text::TextState;
 
 
 #[derive(Lens)]
