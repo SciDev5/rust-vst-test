@@ -1,32 +1,37 @@
-use std::{num::NonZeroU32, sync::{Arc, Mutex, atomic::Ordering}, path::Path};
+use std::{
+    num::NonZeroU32,
+    path::Path,
+    sync::{atomic::Ordering, Arc, Mutex},
+};
 
 use atomic_float::AtomicF32;
 use common_data::{CommonDataRef, CommonData};
 use nih_plug::{nih_export_vst3, prelude::*};
 
-mod params;
-mod note;
-mod editor;
-mod state;
-mod wavetable;
-mod common_data;
-mod util;
+mod component;
 mod dbug;
+mod editor;
+mod note;
+mod params;
+mod state;
+mod util;
+mod common_data;
 
+use component::wavetable::{Wav, Wavetable};
+use note::{id::NoteId, *};
 use params::TestParams;
-use note::*;
-use wavetable::Wavetable;
 
+const MAX_POLYPHONY: usize = 16;
 
-const N_VOICES:usize = 5;
+const MIDI_SPEC_CHANNEL_COUNT: usize = 16;
 
 struct TestPlugin {
     params: Arc<TestParams>,
     sample_rate: f32,
 
-    voices: [note::Voice; N_VOICES],
-    channel_tunings: [f32; 16],
-    channel_aftertouch: [f32; 16],
+    voices: Vec<Voice>,
+    channel_tunings: [f32; MIDI_SPEC_CHANNEL_COUNT],
+    channel_aftertouch: [f32; MIDI_SPEC_CHANNEL_COUNT],
 
     peak_meter: Arc<AtomicF32>,
 
@@ -34,15 +39,6 @@ struct TestPlugin {
     last_rel_id: i64,
 }
 impl TestPlugin {
-    #[inline(always)]
-    fn for_each_voice<T>(&mut self, mut cb: T)
-    where
-        T: FnMut(&mut Voice) -> (),
-    {
-        for voice in self.voices.iter_mut() {
-            cb(voice)
-        }
-    }
     fn update_wave(&mut self) {
         let rel_id = self.params.rel_id.load(Ordering::Relaxed);
         if rel_id == self.last_rel_id {
@@ -52,24 +48,15 @@ impl TestPlugin {
         }
         let path = self.params.rel.get_v();
 
-        if let Some(wav) = wavetable::Wav::from_filepath(&Path::new(&path)) {
+        if let Some(wav) = Wav::from_filepath(&Path::new(&path)) {
             if let Some(wav) = Wavetable::slice_downsample(&wav, 2048) {
                 self.data.lock().unwrap().wavetable = wav;
             }
         }
-
     }
-    fn wave(&mut self) -> [f32; 2] {
-        let mut sum: [f32; 2] = [0.0, 0.0];
 
-        self.for_each_voice(|voice| {
-            let voice_wave = voice.next();
-            for i in 0..2 {
-                sum[i] += voice_wave[i];
-            }
-        });
-
-        sum
+    fn kill_voice(&mut self, i: usize) {
+        self.voices.remove(i).kill();
     }
 }
 impl Default for TestPlugin {
@@ -77,18 +64,12 @@ impl Default for TestPlugin {
         let data: CommonDataRef = Arc::new(Mutex::new(CommonData {
             wavetable: Wavetable::default(),
         }));
-        let mut voices = std::array::from_fn(|_| None);
-        for i in 0 .. N_VOICES {
-            voices[i] = Some(Voice::new(
-                data.clone()
-            ))
-        }
-        let voices = voices.map(|it| it.unwrap());
 
         Self {
             params: Arc::new(TestParams::default()),
             sample_rate: 1.0,
-            voices,
+
+            voices: vec![],
             channel_tunings: [0.0; 16],
             channel_aftertouch: [0.0; 16],
 
@@ -137,13 +118,18 @@ impl Plugin for TestPlugin {
     ) -> bool {
         self.sample_rate = buffer_config.sample_rate;
         self.update_wave();
-        self.for_each_voice(|it| it.init(buffer_config));
 
         true
     }
 
     fn reset(&mut self) {
-        self.for_each_voice(|it| it.reset());
+        // clear internal state here
+        {
+            for i in (0..self.voices.len()).rev() {
+                self.kill_voice(i);
+            }
+            self.voices.clear();
+        }
     }
 
     fn params(&self) -> std::sync::Arc<dyn Params> {
@@ -167,8 +153,15 @@ impl Plugin for TestPlugin {
         context: &mut impl ProcessContext<Self>,
     ) -> ProcessStatus {
         let mut midi_ev = context.next_event();
+        let block_length = buffer.samples();
 
-        for (sample_id, samples) in buffer.iter_samples().enumerate() {
+        // :::::::::::::::::::::: MIDI PROCESSING :::::::::::::::::::::: //
+
+        for voice in &mut self.voices {
+            voice.freq.pitchbend.begin_block();
+            voice.aftertouch.begin_block();
+        }
+        for sample_id in 0 .. block_length {
             while let Some(ev) = midi_ev {
                 if ev.timing() > sample_id as u32 {
                     break;
@@ -181,67 +174,102 @@ impl Plugin for TestPlugin {
                         voice_id,
                         ..
                     } => {
-                        if let Some(current_note) = Voice::find_by_held_note(
-                            &mut self.voices,
-                            note,
-                        ) {
-                            current_note.release();
+                        if let Some(current_note) = Voice::find_by_midi_note(&mut self.voices, note)
+                        {
+                            current_note.release(sample_id);
                         }
-                        let voice = Voice::find_to_trigger(&mut self.voices);
-                        voice.trigger(
-                            channel,
-                            voice_id.unwrap_or_default(),
-                            note,
+
+                        // Make space if needed.
+                        Voice::sort_most_disposable_last(&mut self.voices);
+                        while self.voices.len() > MAX_POLYPHONY - 1 {
+                            self.kill_voice(MAX_POLYPHONY - 1);
+                        }
+
+                        self.voices.push(Voice::new(
+                            self.sample_rate,
+                            sample_id as u32,
+                            NoteId {
+                                midi_note: note,
+                                voice_id: voice_id.unwrap_or_default(),
+                                channel,
+                            },
+                            self.channel_tunings[channel as usize],
+                            self.channel_aftertouch[channel as usize],
                             velocity,
-                        );
-                        voice.tuning(self.channel_tunings[channel as usize]);
-                        voice.pressure(self.channel_aftertouch[channel as usize])
+
+                            self.data.clone(),
+                        ));
                     }
                     NoteEvent::NoteOff { note, .. } => {
-                        if let Some(current_note) = Voice::find_by_held_note(
-                            &mut self.voices,
-                            note,
-                        ) {
-                            current_note.release()
+                        if let Some(current_note) = Voice::find_by_midi_note(&mut self.voices, note)
+                        {
+                            current_note.release(sample_id);
                         }
                     }
-                    NoteEvent::MidiChannelPressure { pressure, channel, .. } => {
+                    NoteEvent::MidiChannelPressure {
+                        pressure, channel, ..
+                    } => {
                         self.channel_aftertouch[channel as usize] = pressure;
                         for note in Voice::find_all_by_channel(&mut self.voices, channel) {
-                            note.pressure(pressure);
+                            note.aftertouch.update_block(sample_id, pressure);
                         }
                     }
                     NoteEvent::MidiPitchBend { channel, value, .. } => {
-                        let tuning = (value*256.0-128.0)/8.0*3.0;
+                        let tuning = (value * 256.0 - 128.0) / 8.0 * 3.0;
                         self.channel_tunings[channel as usize] = tuning;
                         for note in Voice::find_all_by_channel(&mut self.voices, channel) {
-                            note.tuning(tuning);
+                            note.freq.pitchbend.update_block(sample_id, tuning);
                         }
                     }
                     _ => (),
-                }
+                };
                 midi_ev = context.next_event();
             }
+        }
+        for voice in &mut self.voices {
+            voice.freq.pitchbend.finalize_block(block_length);
+            voice.aftertouch.finalize_block(block_length);
+        }
 
+        // :::::::::::::::::::::: PROCESS VOICES :::::::::::::::::::::: //
+        let mut out = [vec![0.0; block_length], vec![0.0; block_length]];
 
-            let wave = self.wave();
-            let gain = nih_plug::prelude::util::db_to_gain_fast(self.params.gain.smoothed.next());
+        for voice in &mut self.voices {
+            voice.process(&mut out);
+        }
 
+        for (sample_id, samples) in buffer.iter_samples().enumerate() {
             for (i, sample) in samples.into_iter().enumerate() {
-                *sample = wave[i] * gain;
+                *sample = out[i][sample_id];
             }
+        }
 
-            // To save resources, a plugin can (and probably should!) only perform expensive
-            // calculations that are only displayed on the GUI while the GUI is open
-            if self.params.editor_state.is_open() {
-                self.update_wave();
+        let mut indices_to_drop = vec![];
+        for (i,_) in (&self.voices)
+            .into_iter().enumerate()
+            .filter(|(_,voice)| voice.is_ended()) {
+                indices_to_drop.push(i);
+        }
+        indices_to_drop.reverse();
+        for i in indices_to_drop {
+            self.kill_voice(i);
+        }
 
-                let amplitude = wave[0].abs();
+        // :::::::::::::::::::::: UI UPDATES :::::::::::::::::::::: //
+
+        // To save resources, a plugin can (and probably should!) only perform expensive
+        // calculations that are only displayed on the GUI while the GUI is open
+        if self.params.editor_state.is_open() {
+            self.update_wave();
+            for sample_id in 0 .. block_length {
+                let wave:[f32; 2] = std::array::from_fn(|i| out[i][sample_id]);
+
+                let amplitude = (wave[0].abs() + wave[1].abs()) / 2.0;
                 let current_peak_meter = self.peak_meter.load(std::sync::atomic::Ordering::Relaxed);
                 let new_peak_meter = if amplitude > current_peak_meter {
                     amplitude
                 } else {
-                    const PEAK_METER_DECAY_WEIGHT:f32 = 0.99;
+                    const PEAK_METER_DECAY_WEIGHT: f32 = 0.99;
                     current_peak_meter * PEAK_METER_DECAY_WEIGHT
                         + amplitude * (1.0 - PEAK_METER_DECAY_WEIGHT)
                 };

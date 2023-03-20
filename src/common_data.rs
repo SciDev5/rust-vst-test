@@ -1,7 +1,6 @@
 use std::sync::{Arc, Mutex};
 
-use crate::wavetable::Wavetable;
-
+use crate::component::wavetable::Wavetable;
 
 pub type CommonDataRef = Arc<Mutex<CommonData>>;
 

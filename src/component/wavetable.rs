@@ -1,11 +1,11 @@
-use crate::{util::Lerpable};
+use crate::util::lerpable::Lerpable;
 use std::{
     fs::File,
     io::{self, Cursor, Read},
     path::Path,
 };
 
-const DEFAULT_WAVE: &[u8; 2097288] = include_bytes!("./assets/default_wave.wav");
+const DEFAULT_WAVE: &[u8; 2097288] = include_bytes!("../assets/default_wave.wav");
 
 fn remap_index(x: f32, size: usize) -> usize {
     ((x * size as f32) as usize).min(size - 1)
