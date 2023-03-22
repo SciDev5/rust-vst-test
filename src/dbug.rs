@@ -2,7 +2,8 @@ use std::{sync::{Mutex, Arc}, thread, time::Duration};
 
 
 #[allow(non_snake_case, unused)]
-pub fn ________BREAKPOINT_________(name: String) {
+pub fn ________BREAKPOINT_________(name: &str) {
+    let name = name.to_string();
     let mutex = Arc::new(Mutex::new(()));
     let mc = mutex.clone();
     thread::spawn(move || {

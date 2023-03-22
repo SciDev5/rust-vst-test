@@ -1,3 +1,5 @@
+use super::params::{ParamSource, ParamPolarity};
+
 
 pub struct MultichunkWhiteNoiseGen {
     buffers: Vec<[f32; Self::L]>,
@@ -48,7 +50,7 @@ impl NoiseOscillatorSpec {
 
 pub struct NoiseOscillator {
     spec: NoiseOscillatorSpec,
-    pub buffer: Vec<f32>,
+    buffer: Vec<f32>,
 }
 impl NoiseOscillator {
     pub fn new(spec: NoiseOscillatorSpec) -> Self {
@@ -64,5 +66,11 @@ impl NoiseOscillator {
                 NoiseType::MultichunkWhiteNoise(gen) => gen.sample(),
             });
         }
+    }
+}
+impl ParamSource for NoiseOscillator {
+    const POLARITY: ParamPolarity = ParamPolarity::Bipolar;
+    fn source_param_buffer(&self) -> &Vec<f32> {
+        &self.buffer
     }
 }

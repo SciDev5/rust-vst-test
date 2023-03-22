@@ -1809,6 +1809,7 @@ dependencies = [
  "native-dialog",
  "nih_plug",
  "nih_plug_vizia",
+ "once_cell",
  "rand 0.8.5",
  "rustfft",
  "serde",

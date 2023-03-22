@@ -1,4 +1,6 @@
-use crate::{util::increment_mod::increment_phase, common_data::CommonDataRef};
+use crate::{util::{increment_mod::increment_phase, param_range::ParamRange}, common_data::CommonDataRef};
+
+use super::params::{ParamSource, ParamPolarity, Param};
 
 pub enum UnisonFalloff {
     Linear,
@@ -74,30 +76,36 @@ impl UnisonVoice {
 pub struct OscillatorSpec {
     unison_spec: UnisonSpec,
     data: CommonDataRef,
+    freq_off: f32,
+    slice: f32,
 }
 impl OscillatorSpec {
     pub fn new(
         unison_spec: UnisonSpec,
         data: CommonDataRef,
+        freq_off: f32,
+        slice: f32,
     ) -> Self {
-        Self { unison_spec, data }
+        Self { unison_spec, data, freq_off, slice }
     }
 }
 
 pub struct Oscillator {
     sample_rate: f32,
 
-    pub buffer: Vec<f32>,
+    buffer: Vec<f32>,
     spec: OscillatorSpec,
 
     voices: Vec<UnisonVoice>,
 
-    slice: f32,
-    freq: f32,
+    pub slice: Param,
+    pub freq: Param,
 }
 
 impl Oscillator {
-    pub fn new(sample_rate: f32, spec: OscillatorSpec, freq: f32) -> Self {
+    pub fn rangeof_freq() -> ParamRange { ParamRange::exponential(0.5, 20000.0) }
+    pub fn rangeof_slice() -> ParamRange { ParamRange::linear(0.0, 1.0) }
+    pub fn new(sample_rate: f32, spec: OscillatorSpec) -> Self {
         Self {
             sample_rate,
 
@@ -105,27 +113,41 @@ impl Oscillator {
             
             voices: spec.unison_spec.into_voices(),
             
-            slice: 0.0,
-            freq,
+            slice: Param::new(spec.slice, Self::rangeof_slice()),
+            freq: Param::new(spec.freq_off, Self::rangeof_freq()),
 
             spec,
         }
     }
+    pub fn update_spec(&mut self, spec: OscillatorSpec) {
+        self.freq.rebase(spec.freq_off);
+        self.slice.rebase(spec.slice);
+        // TODO update voices.
+    }
     pub fn block(&mut self, trigger_at: usize, block_len: usize) {
         self.buffer.clear();
+        
         let wavetable = &self.spec.data.lock().unwrap().wavetable;
+        let slice = self.slice.take(block_len);
+        let freq = self.freq.take(block_len);
         for i in 0 .. block_len {
             let mut value = 0.0;
             for voice in &self.voices {
-                value += wavetable.data.sample(voice.phase, self.slice) * voice.gain;
+                value += wavetable.data.sample(voice.phase, slice[i]) * voice.gain;
             }
             self.buffer.push(value);
 
             if i > trigger_at {
                 for voice in &mut self.voices {
-                    voice.step(self.sample_rate, self.freq);
+                    voice.step(self.sample_rate, freq[i]);
                 }
             }
         }
+    }
+}
+impl ParamSource for Oscillator {
+    const POLARITY: ParamPolarity = ParamPolarity::Bipolar;
+    fn source_param_buffer(&self) -> &Vec<f32> {
+        &self.buffer
     }
 }

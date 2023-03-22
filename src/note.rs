@@ -5,7 +5,7 @@ use nih_plug::prelude::SmoothingStyle;
 use crate::{
     component::{
         env_adsr::{ADSRSpec, EnvelopeADSR},
-        input_params::{InputFrequencyParam, InputParam},
+        params::{InputFrequencyParam, InputParam, ParamSourceImpl, ParamPolarity},
         lfo::{LFOPhase, LFOSpec, LFO},
         noiseosc::{NoiseOscillator, NoiseOscillatorSpec, NoiseType, MultichunkWhiteNoiseGen},
         oscillator::{Oscillator, OscillatorSpec, UnisonSpec, UnisonFalloff, UnisonPhase},
@@ -48,14 +48,14 @@ impl Voice {
     ) -> Self {
         let mut self_ = Self {
             envs: [
-                EnvelopeADSR::new(ADSRSpec::linear(0.005, 0.2, 0.5, 0.005)),
+                EnvelopeADSR::new(ADSRSpec::linear(0.1, 0.2, 0.4, 0.15)),
                 EnvelopeADSR::new(ADSRSpec::linear(0.0, 0.0, 0.0, 0.0)),
             ],
             lfos: std::array::from_fn(|_| {
                 LFO::new(
                     sample_rate,
                     LFOSpec::new(
-                        0.0,
+                        2.0,
                         LFOPhase::AT(0.0),
                         SimpleWaveform::SINE,
                     ),
@@ -69,7 +69,9 @@ impl Voice {
                     UnisonPhase::Random,
                 ),
                 data.clone(),
-            ), 440.0),
+                0.0,
+                0.5,
+            )),
             oscs: [
                 Oscillator::new(sample_rate, OscillatorSpec::new(
                     UnisonSpec::new(
@@ -79,7 +81,9 @@ impl Voice {
                         UnisonPhase::Random,
                     ),
                     data.clone(),
-                ), 440.0),
+                    0.0,
+                    0.5,
+                )),
                 Oscillator::new(sample_rate, OscillatorSpec::new(
                     UnisonSpec::new(
                         4,
@@ -88,10 +92,12 @@ impl Voice {
                         UnisonPhase::Random,
                     ),
                     data.clone(),
-                ), 440.0),
+                    0.0,
+                    0.5,
+                )),
             ],
             subosc: SubOscillator::new(sample_rate, SubOscillatorSpec::new(
-                440.0,
+                0.0,
                 SimpleWaveform::SINE,
             )),
             noiseosc: NoiseOscillator::new(NoiseOscillatorSpec::new(
@@ -127,6 +133,14 @@ impl Voice {
         let block_len = out[0].len();
         let trigger_at = self.state.get_trigger_at();
 
+        // :::::::::::::::::::::: PREP :::::::::::::::::::::: //
+
+        self.freq.prepare();
+
+        
+        // :::::::::::::::::::::: LINK [ENVs] :::::::::::::::::::::: //
+        
+        
         // :::::::::::::::::::::: ENVs :::::::::::::::::::::: //
 
         for env in &mut self.envs {
@@ -141,15 +155,31 @@ impl Voice {
         }
         self.envs[0].update_note_ended(&mut self.state);
 
+        // :::::::::::::::::::::: LINK [LFOs] :::::::::::::::::::::: //
+
+
+
         // :::::::::::::::::::::: LFOs :::::::::::::::::::::: //
 
         for lfo in &mut self.lfos {
             lfo.block(trigger_at, block_len);
         }
 
+        // :::::::::::::::::::::: LINK [MOD OSCILLATOR] :::::::::::::::::::::: //
+
         // :::::::::::::::::::::: MOD OSCILLATOR :::::::::::::::::::::: //
 
         self.osc_p.block(trigger_at, block_len);
+
+        // :::::::::::::::::::::: LINK [MAIN OSCILLATORs] :::::::::::::::::::::: //
+
+        for osc in &mut self.oscs {
+            osc.freq.send_key_track(&self.freq);
+        }
+        self.subosc.freq.send_key_track(&self.freq);
+
+        self.oscs[0].freq.send(&self.lfos[0], ParamPolarity::Bipolar, 0.001);
+
 
         // :::::::::::::::::::::: MAIN OSCILLATORs :::::::::::::::::::::: //
 
@@ -160,17 +190,20 @@ impl Voice {
         self.subosc.block(trigger_at, block_len);
         self.noiseosc.block(trigger_at, block_len);
 
+        // :::::::::::::::::::::: LINK [EFFECTs] :::::::::::::::::::::: //
+
         // :::::::::::::::::::::: EFFECTs :::::::::::::::::::::: //
 
         // todo
 
         // >>>>>>>>>> TEMP OUTPUT
+        let env_0_out = self.envs[0].get_param_buffer(ParamPolarity::Monopolar);
+        let osc_0_out = self.oscs[0].get_param_buffer(ParamPolarity::Bipolar);
         for i in 0 .. block_len {
-            let gain = self.envs[0].buffer[i];
-            out[0][i] = self.oscs[0].buffer[i] * gain;
-            out[1][i] = self.oscs[1].buffer[i] * gain;
+            let gain = env_0_out[i];
+            out[0][i] = osc_0_out[i] * gain;
+            out[1][i] = osc_0_out[i] * gain;
         }
-
     }
 
     pub fn sort_most_disposable_last(voices: &mut Vec<Voice>) {

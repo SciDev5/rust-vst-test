@@ -16,6 +16,10 @@ impl LXInterp {
             (-x) * (1.0 - f32::exp(self.k * (x - 1.0)))
         }
     }
+    pub fn set_k(&mut self, k: f32) {
+        self.positive = k >= 0.0;
+        self.k = k.abs();
+    }
 }
 
 #[cfg(test)]

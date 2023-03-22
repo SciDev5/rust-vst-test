@@ -4,4 +4,4 @@ pub mod lfo;
 pub mod noiseosc;
 pub mod oscillator;
 pub mod subosc;
-pub mod input_params;
+pub mod params;
