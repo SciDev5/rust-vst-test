@@ -167,6 +167,12 @@ impl Plugin for TestPlugin {
                     break;
                 }
                 match ev {
+                    NoteEvent::Choke { note, .. } => {
+                        if let Some(current_note) = Voice::find_by_midi_note(&mut self.voices, note)
+                        {
+                            current_note.choke(sample_id);
+                        }
+                    }
                     NoteEvent::NoteOn {
                         note,
                         velocity,
@@ -250,6 +256,7 @@ impl Plugin for TestPlugin {
             .filter(|(_,voice)| voice.is_ended()) {
                 indices_to_drop.push(i);
         }
+        indices_to_drop.sort();
         indices_to_drop.reverse();
         for i in indices_to_drop {
             self.kill_voice(i);

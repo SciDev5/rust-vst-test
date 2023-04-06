@@ -103,6 +103,9 @@ impl EnvelopeADSR {
     }
 
     fn value(&self, state: &NoteStateCurrentRaw) -> f32 {
+        if state.has_ended {
+            return 0.0;
+        }
         let ADSRv { attack, decay, sustain, release } = self.adsrv;
         (
             if state.since_trigger < 0.0 {

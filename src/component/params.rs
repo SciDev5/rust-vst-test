@@ -65,6 +65,12 @@ impl InputParam {
         self.extend_buffer_to_len(len);
     }
 }
+impl ParamSource for InputParam {
+    const POLARITY: ParamPolarity = ParamPolarity::Monopolar;
+    fn source_param_buffer(&self) -> &Vec<f32> {
+        &self.buffer
+    }
+}
 
 
 pub enum ParamPolarity {

@@ -48,7 +48,7 @@ impl Voice {
     ) -> Self {
         let mut self_ = Self {
             envs: [
-                EnvelopeADSR::new(ADSRSpec::linear(0.1, 0.2, 0.4, 0.15)),
+                EnvelopeADSR::new(ADSRSpec::linear(0.005, 0.0, 1.0, 0.005)),
                 EnvelopeADSR::new(ADSRSpec::linear(0.0, 0.0, 0.0, 0.0)),
             ],
             lfos: std::array::from_fn(|_| {
@@ -63,7 +63,7 @@ impl Voice {
             }),
             osc_p: Oscillator::new(sample_rate, OscillatorSpec::new(
                 UnisonSpec::new(
-                    4,
+                    10,
                     UnisonFalloff::Linear,
                     5.0,
                     UnisonPhase::Random,
@@ -77,7 +77,7 @@ impl Voice {
                     UnisonSpec::new(
                         4,
                         UnisonFalloff::Linear,
-                        5.0,
+                        2.0,
                         UnisonPhase::Random,
                     ),
                     data.clone(),
@@ -98,7 +98,7 @@ impl Voice {
             ],
             subosc: SubOscillator::new(sample_rate, SubOscillatorSpec::new(
                 0.0,
-                SimpleWaveform::SINE,
+                SimpleWaveform::SAW,
             )),
             noiseosc: NoiseOscillator::new(NoiseOscillatorSpec::new(
                 NoiseType::MultichunkWhiteNoise(MultichunkWhiteNoiseGen::new()),
@@ -128,6 +128,9 @@ impl Voice {
     pub fn release(&mut self, in_samples: usize) {
         self.state.mark_released_in(in_samples as u32);
     }
+    pub fn choke(&mut self, in_samples: usize) {
+        self.state.mark_choke_in(in_samples as u32);
+    }
 
     pub fn process(&mut self, out: &mut [Vec<f32>; 2]) {
         let block_len = out[0].len();
@@ -137,6 +140,7 @@ impl Voice {
 
         self.freq.prepare();
 
+        
         
         // :::::::::::::::::::::: LINK [ENVs] :::::::::::::::::::::: //
         
@@ -178,7 +182,8 @@ impl Voice {
         }
         self.subosc.freq.send_key_track(&self.freq);
 
-        self.oscs[0].freq.send(&self.lfos[0], ParamPolarity::Bipolar, 0.001);
+        // self.oscs[0].freq.send(&self.lfos[0], ParamPolarity::Bipolar, 0.0005);
+        self.oscs[0].slice.send(&self.aftertouch, ParamPolarity::Bipolar, 0.5);
 
 
         // :::::::::::::::::::::: MAIN OSCILLATORs :::::::::::::::::::::: //
@@ -199,10 +204,12 @@ impl Voice {
         // >>>>>>>>>> TEMP OUTPUT
         let env_0_out = self.envs[0].get_param_buffer(ParamPolarity::Monopolar);
         let osc_0_out = self.oscs[0].get_param_buffer(ParamPolarity::Bipolar);
+        let sub_out = self.subosc.get_param_buffer(ParamPolarity::Bipolar);
         for i in 0 .. block_len {
             let gain = env_0_out[i];
-            out[0][i] = osc_0_out[i] * gain;
-            out[1][i] = osc_0_out[i] * gain;
+            let osc = osc_0_out[i] * 0.6;// + sub_out[i] * 0.2;
+            out[0][i] += osc * gain;
+            out[1][i] += osc * gain;
         }
     }
 
